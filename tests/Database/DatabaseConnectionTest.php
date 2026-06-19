@@ -7,6 +7,7 @@ use ErrorException;
 use Exception;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Database\Connection;
+use Illuminate\Database\DatabaseTransactionsManager;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\Events\TransactionCommitted;
@@ -250,6 +251,88 @@ class DatabaseConnectionTest extends TestCase
         $connection->beginTransaction();
         $connection->disconnect();
         $this->assertEquals(0, $connection->transactionLevel());
+    }
+
+    public function testDisconnectRollsBackTransactionsManagerWhenTransactionIsActive()
+    {
+        $pdo = $this->createMock(DatabaseConnectionTestMockPDO::class);
+        $connection = $this->getMockConnection(['getName'], $pdo);
+        $connection->method('getName')->willReturn('name');
+        $connection->setTransactionManager($manager = new DatabaseTransactionsManager);
+
+        $connection->beginTransaction();
+
+        $connection->disconnect();
+
+        $this->assertCount(0, $manager->getPendingTransactions());
+        $this->assertEquals(0, $connection->transactionLevel());
+    }
+
+    public function testDisconnectMidTransactionDiscardsStaleAfterCommitCallbacks()
+    {
+        $pdo = $this->createMock(DatabaseConnectionTestMockPDO::class);
+        $connection = $this->getMockConnection(['getName'], $pdo);
+        $connection->method('getName')->willReturn('name');
+        $connection->setReconnector(function ($connection) {
+            $connection->setPdo($this->createMock(DatabaseConnectionTestMockPDO::class));
+        });
+        $connection->setTransactionManager($manager = new DatabaseTransactionsManager);
+
+        $fired = 0;
+        $connection->beginTransaction();
+        $manager->addCallback(function () use (&$fired) {
+            $fired++;
+        });
+
+        $connection->disconnect();
+
+        $connection->beginTransaction();
+        $connection->commit();
+
+        $this->assertSame(0, $fired);
+    }
+
+    public function testDisconnectDoesNotThrowWarningsWhenOtherConnectionHasActiveTransaction()
+    {
+        $pdo1 = $this->createMock(DatabaseConnectionTestMockPDO::class);
+        $connection1 = $this->getMockConnection(['getName'], $pdo1);
+        $connection1->method('getName')->willReturn('conn1');
+
+        $pdo2 = $this->createMock(DatabaseConnectionTestMockPDO::class);
+        $connection2 = $this->getMockConnection(['getName'], $pdo2);
+        $connection2->method('getName')->willReturn('conn2');
+
+        $manager = new DatabaseTransactionsManager;
+        $connection1->setTransactionManager($manager);
+        $connection2->setTransactionManager($manager);
+
+        // conn1 has an active transaction
+        $connection1->beginTransaction();
+
+        // conn2 does NOT have an active transaction, but gets disconnected
+        $connection2->disconnect();
+
+        $this->assertEquals(1, $connection1->transactionLevel());
+        $this->assertEquals(0, $connection2->transactionLevel());
+    }
+
+    public function testRollbackDoesNotThrowWarningsForConnectionWithoutActiveTransaction()
+    {
+        $manager = new DatabaseTransactionsManager;
+
+        $pdo1 = $this->createMock(DatabaseConnectionTestMockPDO::class);
+        $connection1 = $this->getMockConnection(['getName'], $pdo1);
+        $connection1->method('getName')->willReturn('conn1');
+        $connection1->setTransactionManager($manager);
+
+        // conn1 has an active transaction
+        $connection1->beginTransaction();
+
+        // Rollback is called for conn2 (which has no active transaction)
+        $manager->rollback('conn2', 0);
+
+        // Assert no warnings/errors were thrown and conn1 is still active
+        $this->assertEquals(1, $connection1->transactionLevel());
     }
 
     public function testBeganTransactionFiresEventsIfSet()

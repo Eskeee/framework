@@ -135,7 +135,7 @@ class DatabaseTransactionsManager
                                      $transaction->level > $newTransactionLevel
             )->values();
 
-            if ($this->currentTransaction) {
+            if (isset($this->currentTransaction[$connection])) {
                 do {
                     $this->removeCommittedTransactionsThatAreChildrenOf($this->currentTransaction[$connection]);
 
@@ -158,7 +158,7 @@ class DatabaseTransactionsManager
      */
     protected function removeAllTransactionsForConnection($connection)
     {
-        if ($this->currentTransaction) {
+        if (isset($this->currentTransaction[$connection])) {
             for ($currentTransaction = $this->currentTransaction[$connection]; isset($currentTransaction); $currentTransaction = $currentTransaction->parent) {
                 $currentTransaction->executeCallbacksForRollback();
             }
